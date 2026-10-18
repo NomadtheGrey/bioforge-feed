@@ -56,7 +56,73 @@ export default {
       'cache-control': 'public, max-age=60',
     };
     if (request.method === 'OPTIONS') {
-      return new Response(null, { status: 204, headers: { ...headers, 'access-control-allow-methods': 'GET, OPTIONS' } });
+      return new Response(null, { status: 204, headers: { ...headers, 'access-control-allow-methods': 'GET, POST, OPTIONS' } });
+    }
+    // ------------------------------------------------------------
+    // THE PUBLISH DOOR (slice 4, Adam's rulings 2026-10-18).
+    // POST /publish { code, title, body, priority } — the one
+    // write path. The code is checked against the PUBLISH_CODE
+    // secret, which lives ONLY in this Worker's configuration
+    // (Adam sets it in the dashboard; it never travels through
+    // a repo or a chat, and rotating it is a settings edit).
+    // Without the secret configured, the door is closed and
+    // says so — the composer in the kit reports it plainly.
+    // Throttled from KV: a 15-second floor between publishes
+    // and at most 10 in a trailing hour (best-effort — KV is
+    // eventually consistent, and the door's real strength is
+    // the secret, not the counter).
+    // ------------------------------------------------------------
+    const url = new URL(request.url);
+    if (request.method === 'POST' && url.pathname === '/publish') {
+      const json = (obj, status) =>
+        new Response(JSON.stringify(obj), { status, headers: { ...headers, 'cache-control': 'no-store' } });
+      if (!env.PUBLISH_CODE) return json({ error: 'Publishing is not switched on yet — the feed has no publish code set.' }, 503);
+      let doc;
+      try {
+        doc = await request.json();
+      } catch {
+        return json({ error: 'That was not readable JSON.' }, 400);
+      }
+      if (typeof doc?.code !== 'string' || doc.code !== env.PUBLISH_CODE) {
+        return json({ error: 'The feed does not know that code.' }, 401);
+      }
+      const title = typeof doc.title === 'string' ? doc.title.trim().slice(0, 120) : '';
+      const body = typeof doc.body === 'string' ? doc.body.trim().slice(0, 600) : '';
+      const priority = doc.priority === 'notice' ? 'notice' : 'panel';
+      if (!title || !body) return json({ error: 'A broadcast needs a title and a body.' }, 400);
+
+      let throttle = { last: 0, hour: [] };
+      try {
+        const rawT = await env.FEED.get('ratelimit');
+        if (rawT) throttle = JSON.parse(rawT);
+      } catch { /* a lost counter reads as a fresh one */ }
+      const now = Date.now();
+      throttle.hour = (throttle.hour || []).filter((t) => now - t < 3600_000);
+      if (now - (throttle.last || 0) < 15_000 || throttle.hour.length >= 10) {
+        return json({ error: 'Easy — the feed takes a breath between broadcasts. Try again in a moment.' }, 429);
+      }
+
+      let feed = { ...EMPTY_FEED };
+      try {
+        const rawF = await env.FEED.get('feed');
+        if (rawF) feed = { ...EMPTY_FEED, ...JSON.parse(rawF) };
+      } catch { /* a garbled stored doc is rebuilt around the new word */ }
+      const stamp = new Date(now).toISOString();
+      const broadcast = {
+        id: `b-${stamp.slice(0, 10)}-${stamp.slice(11, 19).replace(/:/g, '')}`,
+        date: stamp.slice(0, 10),
+        title,
+        body,
+        priority,
+      };
+      // Newest first; the stored list is capped at 20 — the
+      // channel is rare by design, and old word is history.
+      feed.broadcasts = [broadcast, ...(feed.broadcasts || [])].slice(0, 20);
+      await env.FEED.put('feed', JSON.stringify(feed));
+      throttle.last = now;
+      throttle.hour.push(now);
+      await env.FEED.put('ratelimit', JSON.stringify(throttle));
+      return json({ ok: true, id: broadcast.id }, 200);
     }
     if (request.method !== 'GET') {
       return new Response(JSON.stringify({ error: 'the feed is read-only' }), { status: 405, headers });
