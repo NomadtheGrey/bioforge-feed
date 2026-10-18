@@ -1,0 +1,16 @@
+# The BioForge system feed Worker.
+# Deploy: connect this repo in Cloudflare (Workers Builds),
+# create the KV namespace below, and the feed is live at
+# https://bioforge-feed.nomadthegrey71.workers.dev/
+name = "bioforge-feed"
+main = "src/index.js"
+compatibility_date = "2026-10-18"
+workers_dev = true
+
+# The feed document lives in ONE key ("feed") in this
+# namespace. Create it in the Cloudflare dashboard
+# (Storage & Databases → KV → Create namespace, name it
+# "bioforge-feed") and paste its id here.
+[[kv_namespaces]]
+binding = "FEED"
+id = "d7d52a8cc57842f0ab432a3af7dc8d02"
